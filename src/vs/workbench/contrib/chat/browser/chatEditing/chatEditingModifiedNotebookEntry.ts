@@ -56,7 +56,8 @@ import { ChatEditingNotebookEditorIntegration, countChanges, ICellDiffInfo } fro
 import { ChatEditingSnapshotTextModelContentProvider } from './chatEditingTextModelContentProviders.js';
 
 
-
+const noopKeep = () => Promise.resolve(true);
+const noopUndo = () => Promise.resolve(true);
 
 export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifiedFileEntry {
 	private readonly modifiedModel: NotebookTextModel;
@@ -94,14 +95,6 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 	 */
 	private readonly editedCells = new ResourceSet();
 
-	/**
-	 * When a new cell is inserted, we use the ChatEditingCodeEditorIntegration to handle the edits.
-	 * & to also display undo/redo and decorations.
-	 * However that needs a modified and original model.
-	 * For inserted cells there's no original model, so we create a new empty text model and pass that as the original.
-	 */
-	private readonly emptyTextModel: ITextModel;
-
 	public static async create(uri: URI, _multiDiffEntryDelegate: { collapse: (transaction: ITransaction | undefined) => void }, telemetryInfo: IModifiedEntryTelemetryInfo, chatKind: ChatEditKind, initialContent: string | undefined, instantiationService: IInstantiationService): Promise<AbstractChatEditingModifiedFileEntry> {
 		return instantiationService.invokeFunction(async accessor => {
 			const notebookService = accessor.get(INotebookService);
@@ -115,26 +108,23 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 				notebookService.withNotebookDataProvider(resourceRef.object.notebook.notebookType),
 				notebookService.createNotebookTextDocumentSnapshot(notebook.uri, SnapshotContext.Backup, CancellationToken.None).then(s => streamToBuffer(s))
 			]);
-			const originalDisposables = new DisposableStore();
-			originalDisposables.add(ChatEditingNotebookFileSystemProvider.registerFile(originalUri, buffer));
-
+			const disposables = new DisposableStore();
+			disposables.add(ChatEditingNotebookFileSystemProvider.registerFile(originalUri, buffer));
 			const originalRef = await resolver.resolve(originalUri, notebook.viewType);
-			originalDisposables.add(originalRef);
 			if (initialContent) {
 				restoreSnapshot(originalRef.object.notebook, initialContent);
 			}
 			initialContent = initialContent || createSnapshot(originalRef.object.notebook, options.serializer.options, configurationServie);
-			const dispsoables = new DisposableStore();
 			const modifiedCells = new ResourceMap<ITextModel>();
 			const originalCells = new ResourceMap<ITextModel>();
 			await Promise.all(resourceRef.object.notebook.cells.map(async cell => {
-				modifiedCells.set(cell.uri, dispsoables.add(await textModelService.createModelReference(cell.uri)).object.textEditorModel);
+				modifiedCells.set(cell.uri, disposables.add(await textModelService.createModelReference(cell.uri)).object.textEditorModel);
 			}).concat(originalRef.object.notebook.cells.map(async cell => {
-				originalCells.set(cell.uri, dispsoables.add(await textModelService.createModelReference(cell.uri)).object.textEditorModel);
+				originalCells.set(cell.uri, disposables.add(await textModelService.createModelReference(cell.uri)).object.textEditorModel);
 			})));
 
 			const instance = instantiationService.createInstance(ChatEditingModifiedNotebookEntry, resourceRef, originalRef, modifiedCells, originalCells, _multiDiffEntryDelegate, options.serializer.options, telemetryInfo, chatKind, initialContent);
-			instance._register(dispsoables);
+			instance._register(disposables);
 			return instance;
 		});
 	}
@@ -156,26 +146,39 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 		@IFileService fileService: IFileService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@ITextModelService private readonly textModelService: ITextModelService,
-		@IModelService model: IModelService,
+		@IModelService private readonly modelService: IModelService,
 	) {
 		super(modifiedResourceRef.object.notebook.uri, telemetryInfo, kind, configurationService, fileConfigService, chatService, fileService, instantiationService);
 		this._register(modifiedResourceRef);
 		this._register(originalResourceRef);
-		modifiedCellModels.forEach(cell => this._register(cell));
-		originalCellModels.forEach(cell => this._register(cell));
 		this.modifiedModel = modifiedResourceRef.object.notebook;
 		this.originalModel = originalResourceRef.object.notebook;
 		this.originalURI = this.originalModel.uri;
 		this.initialContent = initialContent;
 		this._register(this.modifiedModel.onDidChangeContent(this.mirrorNotebookEdits, this));
-		this._cellDiffInfo.set(this.modifiedModel.cells.map((cell, i) => ({ modifiedCellIndex: i, originalCellIndex: i, diff: nullDocumentDiff, type: 'unchanged' })), undefined);
 		this._maxModifiedLineNumbers.set(this.modifiedModel.cells.map(() => 0), undefined);
+		this.createEmptyDiffs();
 		this.modifiedModel.cells.forEach((cell, index) => {
 			const originalModel = this.originalCellModels.get(this.originalModel.cells[index].uri)!;
 			this.modifiedToOriginalCellMap.set(cell.uri, originalModel);
 			this.getOrCreateModifiedTextFileEntryForCell(cell);
 		});
-		this.emptyTextModel = this._register(model.createModel('', null, URI.parse('vscode-chat:///empty')));
+	}
+
+	createEmptyDiffs() {
+		this._cellDiffInfo.set(this.modifiedModel.cells.map((cell, i) => {
+			return { modifiedCellIndex: i, originalCellIndex: i, diff: this.getDiffForUnchangedCell(cell), type: 'unchanged' };
+		}), undefined);
+	}
+
+	getDiffForUnchangedCell(cell: NotebookCellTextModel): IDocumentDiff2 {
+		return {
+			...nullDocumentDiff,
+			keep: noopKeep,
+			undo: noopUndo,
+			originalModel: this.modifiedToOriginalCellMap.get(cell.uri)!,
+			modifiedModel: this.modifiedCellModels.get(cell.uri)!,
+		};
 	}
 
 	mirrorNotebookEdits(e: NotebookTextModelChangedEvent) {
@@ -204,24 +207,29 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 		const snapshot = this.modifiedModel.createSnapshot({ context: SnapshotContext.Backup, outputSizeLimit, transientOptions: this.transientOptions });
 		this.originalModel.restoreSnapshot(snapshot, this.transientOptions);
 		this._changesCount.set(0, tx);
-		this._cellDiffInfo.set(this.modifiedModel.cells.map((cell, i) => ({ modifiedCellIndex: i, originalCellIndex: i, diff: nullDocumentDiff, type: 'unchanged' })), undefined);
+		this.createEmptyDiffs();
+
 		await this._collapse(tx);
 	}
 
 	protected override async _doReject(tx: ITransaction | undefined): Promise<void> {
 		if (this.createdInRequestId === this._telemetryInfo.requestId) {
-			await this.modifiedResourceRef.object.revert({ soft: true });
-			await this._fileService.del(this.modifiedURI);
+			await this._applyEdits(async () => {
+				await this.modifiedResourceRef.object.revert({ soft: true });
+				await this._fileService.del(this.modifiedURI);
+			});
 			this._onDidDelete.fire();
 		} else {
-			const outputSizeLimit = this.configurationService.getValue<number>(NotebookSetting.outputBackupSizeLimit) * 1024;
-			const snapshot = this.originalModel.createSnapshot({ context: SnapshotContext.Backup, outputSizeLimit, transientOptions: this.transientOptions });
-			this.modifiedModel.restoreSnapshot(snapshot, this.transientOptions);
-			if (this._allEditsAreFromUs && this._entries.get().every(entry => entry.allEditsAreFromUs)) {
-				// save the file after discarding so that the dirty indicator goes away
-				// and so that an intermediate saved state gets reverted
-				await this.modifiedResourceRef.object.save({ reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
-			}
+			await this._applyEdits(async () => {
+				const outputSizeLimit = this.configurationService.getValue<number>(NotebookSetting.outputBackupSizeLimit) * 1024;
+				const snapshot = this.originalModel.createSnapshot({ context: SnapshotContext.Backup, outputSizeLimit, transientOptions: this.transientOptions });
+				this.modifiedModel.restoreSnapshot(snapshot, this.transientOptions);
+				if (this._allEditsAreFromUs && this._entries.get().every(entry => entry.allEditsAreFromUs)) {
+					// save the file after discarding so that the dirty indicator goes away
+					// and so that an intermediate saved state gets reverted
+					await this.modifiedResourceRef.object.save({ reason: SaveReason.EXPLICIT, skipSaveParticipants: true });
+				}
+			});
 			await this._collapse(tx);
 		}
 
@@ -238,7 +246,7 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 
 	protected override _resetEditsState(tx: ITransaction): void {
 		super._resetEditsState(tx);
-		this.cellEntryMap.forEach(entry => entry.clearCurrentEditLineDecoration());
+		this.cellEntryMap.forEach(entry => !entry.disposed && entry.clearCurrentEditLineDecoration());
 	}
 
 	override async acceptAgentEdits(resource: URI, edits: (TextEdit | ICellEditOperation)[], isLastEdits: boolean, responseModel: IChatResponseModel): Promise<void> {
@@ -255,7 +263,7 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 			});
 		};
 
-		this._applyEdits(async () => {
+		await this._applyEdits(async () => {
 			await Promise.all(edits.map(async edit => {
 				if (TextEdit.isTextEdit(edit)) {
 					if (!this.editedCells.has(resource)) {
@@ -319,25 +327,19 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 				const changes = [new DetailedLineRangeMapping(new LineRange(1, 1), new LineRange(1, lines.length), [innerChanges])];
 				const cell = this.modifiedModel.cells[edit.index + i];
 				const modifiedModel: ITextModel = cell.textModel ?? this._register((await this.textModelService.createModelReference(cell.uri))).object.textEditorModel;
-				const originalModel = this.emptyTextModel;
+				// When a new cell is inserted, we use the ChatEditingCodeEditorIntegration to handle the edits.
+				// & to also display undo/redo and decorations.
+				// However that needs a modified and original model.
+				// For inserted cells there's no original model, so we create a new empty text model and pass that as the original.
+				const originalModel = this._register(this.modelService.createModel('', null, URI.parse('vscode-chat:///empty')));
 				this.modifiedCellModels.set(cell.uri, modifiedModel);
 				this.modifiedToOriginalCellMap.set(cell.uri, originalModel);
 				const keep = async () => {
-					try {
-						this._isEditFromUs = true;
-						this.keepPreviouslyInsertedCell(cell);
-					} finally {
-						this._isEditFromUs = false;
-					}
+					await this._applyEdits(async () => this.keepPreviouslyInsertedCell(cell));
 					return true;
 				};
 				const undo = async () => {
-					try {
-						this._isEditFromUs = true;
-						this.undoPreviouslyInsertedCell(cell);
-					} finally {
-						this._isEditFromUs = false;
-					}
+					await this._applyEdits(async () => this.undoPreviouslyInsertedCell(cell));
 					return true;
 				};
 				this.getOrCreateModifiedTextFileEntryForCell(cell, keep, undo);
@@ -513,7 +515,6 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 		if (cellEntry) {
 			return cellEntry;
 		}
-		const index = this.modifiedModel.cells.indexOf(cell);
 		const originalCellModel = this.modifiedToOriginalCellMap.get(cell.uri);
 		const modifiedCellModel = this.modifiedCellModels.get(cell.uri);
 		if (!modifiedCellModel || !originalCellModel) {
@@ -526,13 +527,16 @@ export class ChatEditingModifiedNotebookEntry extends AbstractChatEditingModifie
 		this._register(autorun(r => {
 			const cellDiff = cellEntry.diffInfo.read(r);
 			let diffs = this.cellDiffInfo.get().slice();
+			const index = this.modifiedModel.cells.indexOf(cell);
 			const entry = diffs.find(entry => entry.modifiedCellIndex === index);
 			if (!entry) {
 				// Not possible.
 				return;
 			}
-			entry.diff = cellDiff;
-			entry.diff = cellDiff.identical ? nullDocumentDiff : cellDiff;
+			entry.diff = { ...entry.diff, ...cellDiff };
+			if (cellDiff.identical) {
+				entry.diff = { ...entry.diff, ...nullDocumentDiff };
+			}
 			if (entry.type === 'unchanged' || entry.type === 'modified') {
 				entry.type = cellDiff.identical ? 'unchanged' : 'modified';
 			}
@@ -696,6 +700,9 @@ class ChatEditingNotebookCellEntry extends ObservableDisposable {
 	}
 
 	public clearCurrentEditLineDecoration() {
+		if (this.modifiedModel.isDisposed()) {
+			return;
+		}
 		this._editDecorations = this.modifiedModel.deltaDecorations(this._editDecorations, []);
 	}
 
