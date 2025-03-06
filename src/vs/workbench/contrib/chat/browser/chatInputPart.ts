@@ -33,9 +33,7 @@ import { EditorOptions } from '../../../../editor/common/config/editorOptions.js
 import { IDimension } from '../../../../editor/common/core/dimension.js';
 import { IPosition } from '../../../../editor/common/core/position.js';
 import { IRange, Range } from '../../../../editor/common/core/range.js';
-import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { ITextModel } from '../../../../editor/common/model.js';
-import { getIconClasses } from '../../../../editor/common/services/getIconClasses.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { CopyPasteController } from '../../../../editor/contrib/dropOrPasteInto/browser/copyPasteController.js';
@@ -79,6 +77,7 @@ import { revealInSideBarCommand } from '../../files/browser/fileActions.contribu
 import { ChatAgentLocation, IChatAgentService } from '../common/chatAgents.js';
 import { ChatContextKeys } from '../common/chatContextKeys.js';
 import { IChatEditingSession, WorkingSetEntryRemovalReason, WorkingSetEntryState } from '../common/chatEditingService.js';
+import { ChatEntitlement, IChatEntitlementService } from '../common/chatEntitlementService.js';
 import { IChatRequestVariableEntry, isImageVariableEntry, isLinkVariableEntry, isPasteVariableEntry } from '../common/chatModel.js';
 import { IChatFollowup } from '../common/chatService.js';
 import { IChatVariablesService } from '../common/chatVariables.js';
@@ -127,7 +126,6 @@ interface IChatInputPartOptions {
 
 export interface IWorkingSetEntry {
 	uri: URI;
-	isMarkedReadonly?: boolean;
 }
 
 export class ChatInputPart extends Disposable implements IHistoryNavigationWidget {
@@ -337,7 +335,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		getContribsInputState: () => any,
 		@IChatWidgetHistoryService private readonly historyService: IChatWidgetHistoryService,
 		@IModelService private readonly modelService: IModelService,
-		@ILanguageService private readonly languageService: ILanguageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
@@ -415,6 +412,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			if (model) {
 				this._currentLanguageModel = { metadata: model, identifier: persistedSelection };
 				this._onDidChangeCurrentLanguageModel.fire(this._currentLanguageModel);
+				this.checkModelSupported();
 			} else {
 				this._waitForPersistedLanguageModel.value = this.languageModelsService.onDidChangeLanguageModels(e => {
 					const persistedModel = e.added?.find(m => m.identifier === persistedSelection);
@@ -424,6 +422,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 						if (persistedModel.metadata.isUserSelectable) {
 							this._currentLanguageModel = { metadata: persistedModel.metadata, identifier: persistedSelection };
 							this._onDidChangeCurrentLanguageModel.fire(this._currentLanguageModel!);
+							this.checkModelSupported();
 						}
 					}
 				});
@@ -431,10 +430,14 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		}
 
 		this._register(this.chatAgentService.onDidChangeToolsAgentModeEnabled(() => {
-			if (this._currentLanguageModel && !this.modelSupportedForDefaultAgent(this._currentLanguageModel)) {
-				this.setCurrentLanguageModelToDefault();
-			}
+			this.checkModelSupported();
 		}));
+	}
+
+	private checkModelSupported(): void {
+		if (this._currentLanguageModel && !this.modelSupportedForDefaultAgent(this._currentLanguageModel)) {
+			this.setCurrentLanguageModelToDefault();
+		}
 	}
 
 	private supportsVision(): boolean {
@@ -475,6 +478,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		this._currentLanguageModel = hasUserSelectableLanguageModels && defaultLanguageModelId ?
 			{ metadata: this.languageModelsService.lookupLanguageModel(defaultLanguageModelId)!, identifier: defaultLanguageModelId } :
 			undefined;
+		if (this._currentLanguageModel) {
+			this._onDidChangeCurrentLanguageModel.fire(this._currentLanguageModel);
+		}
 	}
 
 	private setCurrentLanguageModelByUser(model: ILanguageModelChatMetadataAndIdentifier) {
@@ -729,8 +735,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 					dom.h('.chat-input-container@inputContainer', [
 						dom.h('.chat-attachments-container@attachmentsContainer', [
 							dom.h('.chat-attachment-toolbar@attachmentToolbar'),
-							dom.h('.chat-attached-context@attachedContextContainer'),
 							dom.h('.chat-related-files@relatedFilesContainer'),
+							dom.h('.chat-attached-context@attachedContextContainer'),
 						]),
 						dom.h('.chat-editor-container@editorContainer'),
 						dom.h('.chat-input-toolbars@inputToolbars'),
@@ -964,7 +970,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				hoverDelegate,
 				getKeyBinding: () => undefined,
 				actionViewItemProvider: (action, options) => {
-					if (action.id === 'workbench.action.chat.editing.attachFiles') {
+					if (action.id === 'workbench.action.chat.editing.attachContext') {
 						const viewItem = this.instantiationService.createInstance(AddFilesButton, undefined, action, options);
 						return viewItem;
 					}
@@ -992,7 +998,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		const hoverDelegate = store.add(createInstantHoverDelegate());
 
 		const attachments = [...this.attachmentModel.attachments.entries()];
-		dom.setVisibility(Boolean(attachments.length) || (this.addFilesToolbar && !this.addFilesToolbar.isEmpty()) || Boolean(this.implicitContext?.value) || !this.instructionAttachmentsPart.empty, this.attachmentsContainer);
+		const hasAttachments = Boolean(attachments.length) || Boolean(this.implicitContext?.value) || !this.instructionAttachmentsPart.empty;
+		dom.setVisibility(Boolean(hasAttachments || (this.addFilesToolbar && !this.addFilesToolbar.isEmpty())), this.attachmentsContainer);
+		dom.setVisibility(hasAttachments, this.attachedContextContainer);
 		if (!attachments.length) {
 			this._indexOfLastAttachedContextDeletedWithKeyboard = -1;
 		}
@@ -1305,7 +1313,6 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 					state: metadata.state,
 					description: metadata.description,
 					kind: 'reference',
-					isMarkedReadonly: metadata.isMarkedReadonly,
 				});
 				seenEntries.add(file);
 			}
@@ -1411,6 +1418,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 	async renderChatRelatedFiles(chatEditingSession: IChatEditingSession, anchor: HTMLElement) {
 		dom.clearNode(anchor);
+		dom.setVisibility(Boolean(chatEditingSession.workingSet.size), anchor);
+
 		const hoverDelegate = getDefaultHoverDelegate('element');
 		for (const [uri, metadata] of chatEditingSession.workingSet) {
 			if (metadata.state !== WorkingSetEntryState.Suggested) {
@@ -1422,7 +1431,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 				hoverDelegate
 			}));
 			uriLabel.label = this.labelService.getUriBasenameLabel(uri);
-			uriLabel.element.classList.add('monaco-icon-label', ...getIconClasses(this.modelService, this.languageService, uri, FileKind.FILE));
+			uriLabel.element.classList.add('monaco-icon-label');
 			uriLabel.element.title = localize('suggeste.title', "{0} - {1}", this.labelService.getUriLabel(uri, { relative: true }), metadata.description ?? '');
 
 			this._chatEditsActionsDisposables.add(uriLabel.onDidClick(() => {
@@ -1449,10 +1458,10 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 			sep.classList.add('separator');
 
 			const group = document.createElement('span');
-			group.classList.add('monaco-button-dropdown', 'sidebyside-button', 'show-file-icons');
-			group.appendChild(uriLabel.element);
-			group.appendChild(sep);
+			group.classList.add('monaco-button-dropdown', 'sidebyside-button');
 			group.appendChild(addButton.element);
+			group.appendChild(sep);
+			group.appendChild(uriLabel.element);
 			dom.append(anchor, group);
 
 			this._chatEditsActionsDisposables.add(toDisposable(() => {
@@ -1621,6 +1630,7 @@ class ModelPickerActionViewItem extends DropdownMenuActionViewItemWithKeybinding
 		@IContextMenuService contextMenuService: IContextMenuService,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IContextKeyService contextKeyService: IContextKeyService,
+		@IChatEntitlementService chatEntitlementService: IChatEntitlementService,
 		@ICommandService commandService: ICommandService,
 	) {
 		const modelActionsProvider: IActionProvider = {
@@ -1643,7 +1653,7 @@ class ModelPickerActionViewItem extends DropdownMenuActionViewItemWithKeybinding
 
 				const models: ILanguageModelChatMetadataAndIdentifier[] = this.delegate.getModels();
 				const actions = models.map(entry => setLanguageModelAction(entry));
-				if (contextKeyService.getContextKeyValue<boolean>(ChatContextKeys.Setup.limited.key) === true) {
+				if (chatEntitlementService.entitlement === ChatEntitlement.Limited) {
 					actions.push(new Separator());
 					actions.push(toAction({ id: 'moreModels', label: localize('chat.moreModels', "Add More Models..."), run: () => commandService.executeCommand('workbench.action.chat.upgradePlan') }));
 				}
