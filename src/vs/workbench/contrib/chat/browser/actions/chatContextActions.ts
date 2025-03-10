@@ -68,8 +68,10 @@ import { ATTACH_PROMPT_ACTION_ID, AttachPromptAction, IChatAttachPromptActionOpt
 export function registerChatContextActions() {
 	registerAction2(AttachContextAction);
 	registerAction2(AttachFileToChatAction);
+	registerAction2(AttachFolderToChatAction);
 	registerAction2(AttachSelectionToChatAction);
 	registerAction2(AttachFileToEditingSessionAction);
+	registerAction2(AttachFolderToEditingSessionAction);
 	registerAction2(AttachSelectionToEditingSessionAction);
 }
 
@@ -253,8 +255,8 @@ interface IReusablePromptQuickPickItem extends IQuickPickItem {
 	keybinding?: ResolvedKeybinding;
 }
 
-abstract class AttachFileAction extends Action2 {
-	getFiles(accessor: ServicesAccessor, ...args: any[]): URI[] {
+abstract class AttachResourceAction extends Action2 {
+	getResources(accessor: ServicesAccessor, ...args: any[]): URI[] {
 		const editorService = accessor.get(IEditorService);
 
 		const contexts = Array.isArray(args[1]) ? args[1] : [args[0]];
@@ -280,7 +282,7 @@ abstract class AttachFileAction extends Action2 {
 	}
 }
 
-class AttachFileToChatAction extends AttachFileAction {
+class AttachFileToChatAction extends AttachResourceAction {
 
 	static readonly ID = 'workbench.action.chat.attachFile';
 
@@ -301,12 +303,38 @@ class AttachFileToChatAction extends AttachFileAction {
 
 	override async run(accessor: ServicesAccessor, ...args: any[]): Promise<void> {
 		const variablesService = accessor.get(IChatVariablesService);
-		const files = this.getFiles(accessor, ...args);
+		const files = this.getResources(accessor, ...args);
 
 		if (files.length) {
 			(await showChatView(accessor.get(IViewsService)))?.focusInput();
 			for (const file of files) {
 				variablesService.attachContext('file', file, ChatAgentLocation.Panel);
+			}
+		}
+	}
+}
+
+class AttachFolderToChatAction extends AttachResourceAction {
+
+	static readonly ID = 'workbench.action.chat.attachFolder';
+
+	constructor() {
+		super({
+			id: AttachFolderToChatAction.ID,
+			title: localize2('workbench.action.chat.attachFolder.label', "Add Folder to Chat"),
+			category: CHAT_CATEGORY,
+			f1: false,
+		});
+	}
+
+	override async run(accessor: ServicesAccessor, ...args: any[]): Promise<void> {
+		const variablesService = accessor.get(IChatVariablesService);
+		const folders = this.getResources(accessor, ...args);
+
+		if (folders.length) {
+			(await showChatView(accessor.get(IViewsService)))?.focusInput();
+			for (const folder of folders) {
+				variablesService.attachContext('folder', folder, ChatAgentLocation.Panel);
 			}
 		}
 	}
@@ -373,7 +401,7 @@ class AttachSelectionToChatAction extends Action2 {
 	}
 }
 
-class AttachFileToEditingSessionAction extends AttachFileAction {
+class AttachFileToEditingSessionAction extends AttachResourceAction {
 
 	static readonly ID = 'workbench.action.edits.attachFile';
 
@@ -394,12 +422,38 @@ class AttachFileToEditingSessionAction extends AttachFileAction {
 
 	override async run(accessor: ServicesAccessor, ...args: any[]): Promise<void> {
 		const variablesService = accessor.get(IChatVariablesService);
-		const files = this.getFiles(accessor, ...args);
+		const files = this.getResources(accessor, ...args);
 
 		if (files.length) {
 			(await showEditsView(accessor.get(IViewsService)))?.focusInput();
 			for (const file of files) {
 				variablesService.attachContext('file', file, ChatAgentLocation.EditingSession);
+			}
+		}
+	}
+}
+
+class AttachFolderToEditingSessionAction extends AttachResourceAction {
+
+	static readonly ID = 'workbench.action.edits.attachFolder';
+
+	constructor() {
+		super({
+			id: AttachFolderToEditingSessionAction.ID,
+			title: localize2('workbench.action.edits.attachFolder.label', "Add Folder to {0}", 'Copilot Edits'),
+			category: CHAT_CATEGORY,
+			f1: false,
+		});
+	}
+
+	override async run(accessor: ServicesAccessor, ...args: any[]): Promise<void> {
+		const variablesService = accessor.get(IChatVariablesService);
+		const folders = this.getResources(accessor, ...args);
+
+		if (folders.length) {
+			(await showEditsView(accessor.get(IViewsService)))?.focusInput();
+			for (const folder of folders) {
+				variablesService.attachContext('folder', folder, ChatAgentLocation.EditingSession);
 			}
 		}
 	}
@@ -450,7 +504,7 @@ export class AttachContextAction extends Action2 {
 
 	constructor(desc: Readonly<IAction2Options> = {
 		id: AttachContextAction.ID,
-		title: localize2('workbench.action.chat.attachContext.label', "Attach Context"),
+		title: localize2('workbench.action.chat.attachContext.label.2', "Add Context"),
 		icon: Codicon.attach,
 		category: CHAT_CATEGORY,
 		precondition: ContextKeyExpr.or(AttachContextAction._cdt, ContextKeyExpr.and(ChatContextKeys.location.isEqualTo(ChatAgentLocation.EditingSession))),
@@ -462,9 +516,8 @@ export class AttachContextAction extends Action2 {
 		menu: [
 			{
 				when: ChatContextKeys.location.isEqualTo(ChatAgentLocation.Panel),
-				id: MenuId.ChatInput,
-				group: 'navigation',
-				order: 2
+				id: MenuId.ChatInputAttachmentToolbar,
+				group: 'navigation'
 			},
 			{
 				when: ContextKeyExpr.and(ChatContextKeys.location.isEqualTo(ChatAgentLocation.Panel).negate(), AttachContextAction._cdt),
@@ -608,7 +661,13 @@ export class AttachContextAction extends Action2 {
 					}, []));
 				const selectedFiles = await quickInputService.pick(itemsPromise, { placeHolder: localize('relatedFiles', 'Add related files to your working set'), canPickMany: true });
 				for (const file of selectedFiles ?? []) {
-					chatEditingService.getEditingSession(chatSessionId)?.addFileToWorkingSet(file.value);
+					toAttach.push({
+						id: this._getFileContextId({ resource: file.value }),
+						value: file.value,
+						name: file.label,
+						isFile: true,
+						isOmitted: false
+					});
 				}
 			} else if (isScreenshotQuickPickItem(pick)) {
 				const blob = await hostService.getScreenshot();
@@ -794,7 +853,7 @@ export class AttachContextAction extends Action2 {
 		}
 
 		if (context?.showFilesOnly) {
-			if (chatEditingService?.hasRelatedFilesProviders() && (widget.getInput() || (getEditingSession(chatEditingService, widget)?.workingSet.size))) {
+			if (chatEditingService?.hasRelatedFilesProviders() && (widget.getInput() || widget.attachmentModel.fileAttachments.length > 0)) {
 				quickPickItems.unshift({
 					kind: 'related-files',
 					id: 'related-files',
@@ -968,12 +1027,16 @@ export class AttachContextAction extends Action2 {
 registerAction2(class AttachFilesAction extends AttachContextAction {
 	constructor() {
 		super({
-			id: 'workbench.action.chat.editing.attachFiles',
-			title: localize2('workbench.action.chat.editing.attachFiles.label', "Add Files to Copilot Edits"),
-			shortTitle: localize2('workbench.action.chat.editing.attachFiles.shortLabel', "Add Files..."),
+			id: 'workbench.action.chat.editing.attachContext',
+			title: localize2('workbench.action.chat.editing.attachContext.label', "Add Context to Copilot Edits"),
+			shortTitle: localize2('workbench.action.chat.editing.attachContext.shortLabel', "Add Context..."),
 			f1: false,
 			category: CHAT_CATEGORY,
-			menu: { id: MenuId.ChatInputAttachmentToolbar, group: 'navigation' },
+			menu: {
+				when: ChatContextKeys.location.isEqualTo(ChatAgentLocation.EditingSession),
+				id: MenuId.ChatInputAttachmentToolbar,
+				group: 'navigation'
+			},
 			icon: Codicon.attach,
 			precondition: ChatContextKeys.location.isEqualTo(ChatAgentLocation.EditingSession),
 			keybinding: {
@@ -990,12 +1053,5 @@ registerAction2(class AttachFilesAction extends AttachContextAction {
 		return super.run(accessor, attachFilesContext);
 	}
 });
-
-function getEditingSession(chatEditingService: IChatEditingService, chatWidget: IChatWidget) {
-	if (!chatWidget.viewModel?.sessionId) {
-		return;
-	}
-	return chatEditingService.getEditingSession(chatWidget.viewModel.sessionId);
-}
 
 registerAction2(AttachPromptAction);
