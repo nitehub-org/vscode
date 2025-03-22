@@ -22,6 +22,27 @@ const mcpSchemaExampleServer = {
 	env: {},
 };
 
+export const enum DiscoverySource {
+	ClaudeDesktop = 'claude-desktop',
+	Windsurf = 'windsurf',
+	CursorGlobal = 'cursor-global',
+	CursorWorkspace = 'cursor-workspace',
+}
+
+export const allDiscoverySources = Object.keys({
+	[DiscoverySource.ClaudeDesktop]: true,
+	[DiscoverySource.Windsurf]: true,
+	[DiscoverySource.CursorGlobal]: true,
+	[DiscoverySource.CursorWorkspace]: true,
+} satisfies Record<DiscoverySource, true>) as DiscoverySource[];
+
+export const discoverySourceLabel: Record<DiscoverySource, string> = {
+	[DiscoverySource.ClaudeDesktop]: localize('mcp.discovery.source.claude-desktop', "Claude Desktop"),
+	[DiscoverySource.Windsurf]: localize('mcp.discovery.source.windsurf', "Windsurf"),
+	[DiscoverySource.CursorGlobal]: localize('mcp.discovery.source.cursor-global', "Cursor (Global)"),
+	[DiscoverySource.CursorWorkspace]: localize('mcp.discovery.source.cursor-workspace', "Cursor (Workspace)"),
+};
+
 export const mcpConfigurationSection = 'mcp';
 export const mcpDiscoverySection = 'chat.mcp.discovery.enabled';
 
@@ -30,6 +51,45 @@ export const mcpSchemaExampleServers = {
 		command: 'python',
 		args: ['-m', 'mcp_server_time', '--local-timezone=America/Los_Angeles'],
 		env: {},
+	}
+};
+
+export const mcpStdioServerSchema: IJSONSchema = {
+	type: 'object',
+	additionalProperties: false,
+	examples: [mcpSchemaExampleServer],
+	properties: {
+		type: {
+			type: 'string',
+			enum: ['stdio'],
+			description: localize('app.mcp.json.type', "The type of the server.")
+		},
+		command: {
+			type: 'string',
+			description: localize('app.mcp.json.command', "The command to run the server.")
+		},
+		args: {
+			type: 'array',
+			description: localize('app.mcp.args.command', "Arguments passed to the server."),
+			items: {
+				type: 'string'
+			},
+		},
+		envFile: {
+			type: 'string',
+			description: localize('app.mcp.envFile.command', "Path to a file containing environment variables for the server."),
+			examples: ['${workspaceFolder}/.env'],
+		},
+		env: {
+			description: localize('app.mcp.env.command', "Environment variables passed to the server."),
+			additionalProperties: {
+				anyOf: [
+					{ type: 'null' },
+					{ type: 'string' },
+					{ type: 'number' },
+				]
+			}
+		},
 	}
 };
 
@@ -44,39 +104,7 @@ export const mcpServerSchema: IJSONSchema = {
 		servers: {
 			examples: [mcpSchemaExampleServers],
 			additionalProperties: {
-				oneOf: [{
-					type: 'object',
-					additionalProperties: false,
-					examples: [mcpSchemaExampleServer],
-					properties: {
-						type: {
-							type: 'string',
-							enum: ['stdio'],
-							description: localize('app.mcp.json.type', "The type of the server.")
-						},
-						command: {
-							type: 'string',
-							description: localize('app.mcp.json.command', "The command to run the server.")
-						},
-						args: {
-							type: 'array',
-							description: localize('app.mcp.args.command', "Arguments passed to the server."),
-							items: {
-								type: 'string'
-							},
-						},
-						env: {
-							description: localize('app.mcp.env.command', "Environment variables passed to the server."),
-							additionalProperties: {
-								anyOf: [
-									{ type: 'null' },
-									{ type: 'string' },
-									{ type: 'number' },
-								]
-							}
-						},
-					}
-				}, {
+				oneOf: [mcpStdioServerSchema, {
 					type: 'object',
 					additionalProperties: false,
 					required: ['url', 'type'],

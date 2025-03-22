@@ -25,7 +25,7 @@ export class ExtensionGalleryManifestService extends Disposable implements IExte
 	readonly onDidChangeExtensionGalleryManifest = Event.None;
 
 	constructor(
-		@IProductService private readonly productService: IProductService,
+		@IProductService protected readonly productService: IProductService,
 	) {
 		super();
 	}
@@ -74,6 +74,13 @@ export class ExtensionGalleryManifestService extends Disposable implements IExte
 			resources.push({
 				id: `${extensionsGallery.itemUrl}/?itemName={publisher}.{name}&ssr=false#review-details`,
 				type: ExtensionGalleryResourceType.ExtensionRatingViewUri
+			});
+		}
+
+		if (extensionsGallery.resourceUrlTemplate) {
+			resources.push({
+				id: extensionsGallery.resourceUrlTemplate,
+				type: ExtensionGalleryResourceType.ExtensionResourceUri
 			});
 		}
 
