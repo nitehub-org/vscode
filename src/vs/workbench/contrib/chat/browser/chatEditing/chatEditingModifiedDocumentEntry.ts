@@ -13,7 +13,7 @@ import { assertType } from '../../../../../base/common/types.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { getCodeEditor } from '../../../../../editor/browser/editorBrowser.js';
 import { EditOperation, ISingleEditOperation } from '../../../../../editor/common/core/editOperation.js';
-import { OffsetEdit } from '../../../../../editor/common/core/edits/offsetEdit.js';
+import { StringEdit } from '../../../../../editor/common/core/edits/stringEdit.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 import { IDocumentDiff, nullDocumentDiff } from '../../../../../editor/common/diff/documentDiffProvider.js';
 import { DetailedLineRangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
@@ -22,7 +22,7 @@ import { ILanguageService } from '../../../../../editor/common/languages/languag
 import { IModelDeltaDecoration, ITextModel, MinimapPosition, OverviewRulerLane } from '../../../../../editor/common/model.js';
 import { SingleModelEditStackElement } from '../../../../../editor/common/model/editStack.js';
 import { ModelDecorationOptions, createTextBufferFactoryFromSnapshot } from '../../../../../editor/common/model/textModel.js';
-import { offsetEditFromContentChanges, offsetEditFromLineRangeMapping, offsetEditToEditOperations } from '../../../../../editor/common/model/textModelOffsetEdit.js';
+import { offsetEditFromContentChanges, offsetEditFromLineRangeMapping, offsetEditToEditOperations } from '../../../../../editor/common/model/textModelStringEdit.js';
 import { IEditorWorkerService } from '../../../../../editor/common/services/editorWorker.js';
 import { IModelService } from '../../../../../editor/common/services/model.js';
 import { IResolvedTextEditorModel, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
@@ -78,7 +78,7 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 
 	private readonly _docFileEditorModel: IResolvedTextEditorModel;
 
-	private _edit: OffsetEdit = OffsetEdit.empty;
+	private _edit: StringEdit = StringEdit.empty;
 	private _isEditFromUs: boolean = false;
 	private _allEditsAreFromUs: boolean = true;
 	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
@@ -158,7 +158,7 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 
 		const resourceFilter = this._register(new MutableDisposable());
 		this._register(autorun(r => {
-			const inProgress = this._lastModifyingResponseInProgressObs.read(r);
+			const inProgress = this._waitsForLastEdits.read(r);
 			if (inProgress) {
 				const res = this._lastModifyingResponseObs.read(r);
 				const req = res && res.session.getRequests().find(value => value.id === res.requestId);
@@ -285,43 +285,54 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 		assertType(textEdits.every(TextEdit.isTextEdit), 'INVALID args, can only handle text edits');
 		assert(isEqual(resource, this.modifiedURI), ' INVALID args, can only edit THIS document');
 
-		const ops = textEdits.map(TextEdit.asEditOperation);
-		const undoEdits = this._applyEdits(ops);
+		const isAtomicEdits = textEdits.length > 0 && isLastEdits;
 
-		const maxLineNumber = undoEdits.reduce((max, op) => Math.max(max, op.range.startLineNumber), 0);
+		let rewriteRatio = 0;
 
-		const newDecorations: IModelDeltaDecoration[] = [
-			// decorate pending edit (region)
-			{
-				options: ChatEditingModifiedDocumentEntry._pendingEditDecorationOptions,
-				range: new Range(maxLineNumber + 1, 1, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
+		if (isAtomicEdits) {
+			// EDIT and DONE
+			const minimalEdits = await this._editorWorkerService.computeMoreMinimalEdits(this.modifiedModel.uri, textEdits) ?? textEdits;
+			const ops = minimalEdits.map(TextEdit.asEditOperation);
+			this._applyEdits(ops);
+
+		} else {
+			// EDIT a bit, then DONE
+			const ops = textEdits.map(TextEdit.asEditOperation);
+			const undoEdits = this._applyEdits(ops);
+			const maxLineNumber = undoEdits.reduce((max, op) => Math.max(max, op.range.startLineNumber), 0);
+			rewriteRatio = Math.min(1, maxLineNumber / this.modifiedModel.getLineCount());
+
+			const newDecorations: IModelDeltaDecoration[] = [
+				// decorate pending edit (region)
+				{
+					options: ChatEditingModifiedDocumentEntry._pendingEditDecorationOptions,
+					range: new Range(maxLineNumber + 1, 1, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
+				}
+			];
+
+			if (maxLineNumber > 0) {
+				// decorate last edit
+				newDecorations.push({
+					options: ChatEditingModifiedDocumentEntry._lastEditDecorationOptions,
+					range: new Range(maxLineNumber, 1, maxLineNumber, Number.MAX_SAFE_INTEGER)
+				});
 			}
-		];
+			this._editDecorations = this.modifiedModel.deltaDecorations(this._editDecorations, newDecorations);
 
-		if (maxLineNumber > 0) {
-			// decorate last edit
-			newDecorations.push({
-				options: ChatEditingModifiedDocumentEntry._lastEditDecorationOptions,
-				range: new Range(maxLineNumber, 1, maxLineNumber, Number.MAX_SAFE_INTEGER)
-			});
 		}
 
-		this._editDecorations = this.modifiedModel.deltaDecorations(this._editDecorations, newDecorations);
-
-
 		transaction((tx) => {
+			this._waitsForLastEdits.set(!isLastEdits, tx);
 			if (!isLastEdits) {
 				this._stateObs.set(ModifiedFileEntryState.Modified, tx);
 				this._isCurrentlyBeingModifiedByObs.set(responseModel, tx);
-				const lineCount = this.modifiedModel.getLineCount();
-				this._rewriteRatioObs.set(Math.min(1, maxLineNumber / lineCount), tx);
+				this._rewriteRatioObs.set(rewriteRatio, tx);
 
 			} else {
 				this._resetEditsState(tx);
 				this._updateDiffInfoSeq();
 				this._rewriteRatioObs.set(1, tx);
 				this._editDecorationClear.schedule();
-
 			}
 		});
 		if (isLastEdits) {
@@ -440,7 +451,7 @@ export class ChatEditingModifiedDocumentEntry extends AbstractChatEditingModifie
 	protected override async _doAccept(tx: ITransaction | undefined): Promise<void> {
 		this.originalModel.setValue(this.modifiedModel.createSnapshot());
 		this._diffInfo.set(nullDocumentDiff, tx);
-		this._edit = OffsetEdit.empty;
+		this._edit = StringEdit.empty;
 		await this._collapse(tx);
 
 		const config = this._fileConfigService.getAutoSaveConfiguration(this.modifiedURI);
