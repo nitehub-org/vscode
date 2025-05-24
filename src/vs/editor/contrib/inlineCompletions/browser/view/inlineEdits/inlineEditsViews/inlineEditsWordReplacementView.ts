@@ -15,7 +15,7 @@ import { Point } from '../../../../../../common/core/2d/point.js';
 import { Rect } from '../../../../../../common/core/2d/rect.js';
 import { LineSource, renderLines, RenderOptions } from '../../../../../../browser/widget/diffEditor/components/diffEditorViewZones/renderLines.js';
 import { EditorOption } from '../../../../../../common/config/editorOptions.js';
-import { SingleOffsetEdit } from '../../../../../../common/core/edits/offsetEdit.js';
+import { StringReplacement } from '../../../../../../common/core/edits/stringEdit.js';
 import { OffsetRange } from '../../../../../../common/core/ranges/offsetRange.js';
 import { TextReplacement } from '../../../../../../common/core/edits/textEdit.js';
 import { ILanguageService } from '../../../../../../common/languages/language.js';
@@ -23,7 +23,7 @@ import { LineTokens } from '../../../../../../common/tokens/lineTokens.js';
 import { TokenArray } from '../../../../../../common/tokens/tokenArray.js';
 import { IInlineEditsView, InlineEditTabAction } from '../inlineEditsViewInterface.js';
 import { getModifiedBorderColor, getOriginalBorderColor, modifiedChangedTextOverlayColor, originalChangedTextOverlayColor } from '../theme.js';
-import { mapOutFalsy, rectToProps } from '../utils/utils.js';
+import { getEditorValidOverlayRect, mapOutFalsy, rectToProps } from '../utils/utils.js';
 
 export class InlineEditsWordReplacementView extends Disposable implements IInlineEditsView {
 
@@ -60,7 +60,7 @@ export class InlineEditsWordReplacementView extends Disposable implements IInlin
 			const tm = this._editor.model.get()!;
 			const origLine = tm.getLineContent(this._edit.range.startLineNumber);
 
-			const edit = SingleOffsetEdit.replace(new OffsetRange(this._edit.range.startColumn - 1, this._edit.range.endColumn - 1), this._edit.text);
+			const edit = StringReplacement.replace(new OffsetRange(this._edit.range.startColumn - 1, this._edit.range.endColumn - 1), this._edit.text);
 			const lineToTokenize = edit.replace(origLine);
 			const t = tm.tokenization.tokenizeLinesAt(this._edit.range.startLineNumber, [lineToTokenize])?.[0];
 			let tokens: LineTokens;
@@ -113,7 +113,6 @@ export class InlineEditsWordReplacementView extends Disposable implements IInlin
 					return [];
 				}
 
-				const contentLeft = this._editor.layoutInfoContentLeft.read(reader);
 				const borderWidth = 1;
 
 				const originalBorderColor = getOriginalBorderColor(this._tabAction).map(c => asCssVariable(c)).read(reader);
@@ -123,10 +122,7 @@ export class InlineEditsWordReplacementView extends Disposable implements IInlin
 					n.div({
 						style: {
 							position: 'absolute',
-							top: 0,
-							left: contentLeft,
-							width: this._editor.contentWidth,
-							height: this._editor.editor.getContentHeight(),
+							...rectToProps((r) => getEditorValidOverlayRect(this._editor).read(r)),
 							overflow: 'hidden',
 							pointerEvents: 'none',
 						}

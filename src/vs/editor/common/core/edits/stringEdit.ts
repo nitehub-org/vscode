@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { commonPrefixLength, commonSuffixLength } from '../../../../base/common/strings.js';
 import { OffsetRange } from '../ranges/offsetRange.js';
 import { BaseEdit, BaseReplacement } from './edit.js';
 
@@ -46,6 +47,10 @@ export class StringEdit extends BaseEdit<StringReplacement, StringEdit> {
 			result = result.compose(edits[i]);
 		}
 		return result;
+	}
+
+	constructor(replacements: readonly StringReplacement[]) {
+		super(replacements);
 	}
 
 	protected override _createNew(replacements: readonly StringReplacement[]): StringEdit {
@@ -138,6 +143,21 @@ export class StringEdit extends BaseEdit<StringReplacement, StringEdit> {
 			len: e.replaceRange.length,
 		}));
 	}
+
+	public isNeutralOn(text: string): boolean {
+		return this.replacements.every(e => e.isNeutralOn(text));
+	}
+
+	public removeCommonSuffixPrefix(originalText: string): StringEdit {
+		const edits: StringReplacement[] = [];
+		for (const e of this.replacements) {
+			const edit = e.removeCommonSuffixPrefix(originalText);
+			if (!edit.isEmpty) {
+				edits.push(edit);
+			}
+		}
+		return new StringEdit(edits);
+	}
 }
 
 /**
@@ -195,4 +215,97 @@ export class StringReplacement extends BaseReplacement<StringReplacement> {
 	replace(str: string): string {
 		return str.substring(0, this.replaceRange.start) + this.newText + str.substring(this.replaceRange.endExclusive);
 	}
+
+	/**
+	 * Checks if the edit would produce no changes when applied to the given text.
+	 */
+	isNeutralOn(text: string): boolean {
+		return this.newText === text.substring(this.replaceRange.start, this.replaceRange.endExclusive);
+	}
+
+	removeCommonSuffixPrefix(originalText: string): StringReplacement {
+		const oldText = originalText.substring(this.replaceRange.start, this.replaceRange.endExclusive);
+
+		const prefixLen = commonPrefixLength(oldText, this.newText);
+		const suffixLen = Math.min(
+			oldText.length - prefixLen,
+			this.newText.length - prefixLen,
+			commonSuffixLength(oldText, this.newText)
+		);
+
+		const replaceRange = new OffsetRange(
+			this.replaceRange.start + prefixLen,
+			this.replaceRange.endExclusive - suffixLen,
+		);
+		const newText = this.newText.substring(prefixLen, this.newText.length - suffixLen);
+
+		return new StringReplacement(replaceRange, newText);
+	}
+}
+
+export function applyEditsToRanges(sortedRanges: OffsetRange[], edit: StringEdit): OffsetRange[] {
+	sortedRanges = sortedRanges.slice();
+
+	// treat edits as deletion of the replace range and then as insertion that extends the first range
+	const result: OffsetRange[] = [];
+
+	let offset = 0;
+
+	for (const e of edit.replacements) {
+		while (true) {
+			// ranges before the current edit
+			const r = sortedRanges[0];
+			if (!r || r.endExclusive >= e.replaceRange.start) {
+				break;
+			}
+			sortedRanges.shift();
+			result.push(r.delta(offset));
+		}
+
+		const intersecting: OffsetRange[] = [];
+		while (true) {
+			const r = sortedRanges[0];
+			if (!r || !r.intersectsOrTouches(e.replaceRange)) {
+				break;
+			}
+			sortedRanges.shift();
+			intersecting.push(r);
+		}
+
+		for (let i = intersecting.length - 1; i >= 0; i--) {
+			let r = intersecting[i];
+
+			const overlap = r.intersect(e.replaceRange)!.length;
+			r = r.deltaEnd(-overlap + (i === 0 ? e.newText.length : 0));
+
+			const rangeAheadOfReplaceRange = r.start - e.replaceRange.start;
+			if (rangeAheadOfReplaceRange > 0) {
+				r = r.delta(-rangeAheadOfReplaceRange);
+			}
+
+			if (i !== 0) {
+				r = r.delta(e.newText.length);
+			}
+
+			// We already took our offset into account.
+			// Because we add r back to the queue (which then adds offset again),
+			// we have to remove it here.
+			r = r.delta(-(e.newText.length - e.replaceRange.length));
+
+			sortedRanges.unshift(r);
+		}
+
+		offset += e.newText.length - e.replaceRange.length;
+	}
+
+	while (true) {
+		const r = sortedRanges[0];
+		if (!r) {
+			break;
+		}
+		sortedRanges.shift();
+		result.push(r.delta(offset));
+	}
+
+	return result;
 }
